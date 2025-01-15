@@ -1,6 +1,5 @@
+pmdarima
 pandas
-numpy
-statsmodels
+numpy==1.26.4
 matplotlib
-scikit-learn
 PyQt6
