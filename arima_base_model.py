@@ -1,7 +1,16 @@
 import pandas as pd
 import numpy as np
-from statsmodels.tsa.arima.model import ARIMA
 import matplotlib.pyplot as plt
+import pickle
+from pmdarima import auto_arima
+
+def avg_popularity_last_8_weeks(group):
+    # Posortowanie według tygodnia
+    group = group.sort_values(by='week', ascending=False)
+    # Wybranie ostatnich 8 tygodni
+    last_8_weeks = group.head(8)
+    # Obliczenie średniej popularności
+    return last_8_weeks['weekly_popularity_score'].mean()
 
 print("Wczytywanie danych...")
 sessions = pd.read_json('V1/sessions.jsonl', lines=True)
@@ -34,87 +43,109 @@ weekly_scores = sessions.groupby(['track_id', 'week']).apply(
               w3 * x['event_type'].eq('skip').sum()
 ).reset_index(name='weekly_popularity_score')
 
+track_popularity = weekly_scores.groupby('track_id').apply(avg_popularity_last_8_weeks).reset_index(name='avg_popularity')
+top_tracks = track_popularity.sort_values(by='avg_popularity', ascending=False).head(500)
+top_tracks = top_tracks.merge(tracks[['id', 'name']], left_on='track_id', right_on='id', how='left')
+
 print("Rozpoczynanie przetwarzania ARIMA dla każdego utworu...")
-unique_track_ids = weekly_scores['track_id'].unique()
 
 results = []
-for idx, track_id in enumerate(unique_track_ids, 1):
-    print(f"Przetwarzanie track_id: {track_id} ({idx}/{len(unique_track_ids)})")
-    
-    track_data = weekly_scores[weekly_scores['track_id'] == track_id].set_index('week')['weekly_popularity_score']
-    track_data = track_data.asfreq('W').fillna(0)
-    track_data = track_data.sort_index()
+error_results = []
+for idx, row in enumerate(top_tracks.itertuples(), 1):
+    track_id = row.track_id
+    track_name = row.name
 
+    track_data = weekly_scores[weekly_scores['track_id'] == track_id]
+    track_data = track_data.set_index('week')['weekly_popularity_score'].sort_index()
+    track_data = track_data.asfreq('W')
+    # track_data = fill_missing_with_average(track_data)
 
-    if len(track_data) < 50: 
-        print(f"Pomijanie track_id: {track_id}, za mało danych historycznych (tylko {len(track_data)} tygodni).")
-        continue
-    
-    train_data = track_data[-8:-4]
+    train_data = track_data[:-4]
     test_data = track_data[-4:]
-    
+
     try:
-        model = ARIMA(train_data, order=(5, 2, 0))
-        model_fit = model.fit()
-        forecast = model_fit.forecast(steps=4)
-        results.append((track_id, forecast))
-        print(f"Zakończono przetwarzanie dla track_id: {track_id}")
+        model = auto_arima(
+            train_data,
+            seasonal=False,
+            trace=True,
+            error_action='ignore',
+            suppress_warnings=True,
+            stepwise=True)
+        forecast = model.predict(n_periods=4)
+        # Obliczanie błędów MAE i MSE
+        mae = np.mean(np.abs(forecast - test_data.values))
+        mse = np.mean((forecast - test_data.values) ** 2)
+        error_results.append({
+            "track_id": track_id,
+            "track_name": track_name,
+            "MAE": mae,
+            "MSE": mse
+        })
+        
+        # Zapis wyników
+        results.append({
+            "track_id": track_id,
+            "track_name": track_name,
+            "forecast": forecast,
+            "test_data": test_data
+        })
+        print(f"Prognoza zakończona dla tracku z id {track_id}.")
+        with open(f"arima_models/arima_model_{track_id}.pkl", 'wb') as model_file:
+            pickle.dump(model, model_file)
     except Exception as e:
-        print(f"Błąd podczas przetwarzania track_id: {track_id}. Szczegóły: {e}")
-        continue
+        print(f"Błąd podczas trenowania modelu ARIMA dla tracku {track_id}. Szczegóły: {e}")
 
 
+print("Wizualizacja wyników dla pierwszych utworów...")
+for result in results[:5]:  # Wizualizacja dla 5 pierwszych utworów
+    track_name = result['track_name']
+    track_id = result['track_id']
+    forecast = result['forecast']
+    test_data = result['test_data']
+    
+    # Pobranie danych historycznych
+    track_data = weekly_scores[weekly_scores['track_id'] == track_id]
+    track_data = track_data.set_index('week')['weekly_popularity_score'].sort_index()
+    track_data = track_data.asfreq('W').fillna(0)
+    
+    track_data.index = track_data.index.to_timestamp()
 
-if results:
-    for single_result in results[:10]:
-        print("Wizualizacja wyników dla pierwszego utworu...")
-        example_track_id, example_forecast = single_result
-        track_data = weekly_scores[weekly_scores['track_id'] == example_track_id].set_index('week')['weekly_popularity_score']
-        track_data = track_data.asfreq('W').fillna(0)
-        test_data = track_data[-4:]
-
-    # Konwersja indeksu na datetime
-        track_data.index = track_data.index.to_timestamp()
-
-        # Wizualizacja danych
-        plt.figure(figsize=(10, 6))
-        plt.plot(track_data.index, track_data, label='Observed')
-        plt.plot(test_data.index.to_timestamp(), test_data, label='Actual Future', linestyle='--')
-        plt.plot(test_data.index.to_timestamp(), example_forecast, label='Forecasted', linestyle='--')
-        plt.title(f'Popularity Forecast for Track {example_track_id}')
-        plt.legend()
-        plt.show()
-
-else:
-    print("Brak wystarczających danych do wizualizacji wyników.")
-# print(results)
-# print(test_data)
-if results:
-    error_results = []
-    for result in results:
-        mae = np.mean(np.abs(np.array(result[1]) - np.array(train_data[-4])))
-        mse = np.mean((np.array(result[1]) - np.array(train_data[-4])) ** 2)
-        error_results.append({"track_id": result[0], "MAE": mae, "MSE": mse})
-
-    # Konwersja wyników na DataFrame
-    error_df = pd.DataFrame(error_results)
-
-    # Tworzenie histogramu dla MAE
+    # Wizualizacja danych historycznych i prognozy
     plt.figure(figsize=(10, 6))
-    plt.hist(error_df["MAE"], bins=10, edgecolor="black", alpha=0.7)
-    plt.title("Histogram of Mean Absolute Error (MAE)")
-    plt.xlabel("MAE range")
-    plt.ylabel("Frequency")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.plot(track_data.index, track_data, label='Observed')
+    plt.plot(test_data.index, test_data, label='Actual Future', linestyle='--', color='orange')
+    plt.plot(test_data.index, forecast, label='Forecasted', linestyle='--', color='green')
+    plt.title(f"Popularity Forecast for Track {track_name} (ID: {track_id})")
+    plt.xlabel("Time")
+    plt.ylabel("Popularity")
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
-    # Tworzenie histogramu dla MSE
-    plt.figure(figsize=(10, 6))
-    plt.hist(error_df["MSE"], bins=10, edgecolor="black", alpha=0.7)
-    plt.title("Histogram of Mean Squared Error (MSE)")
-    plt.xlabel("MSE range")
-    plt.ylabel("Frequency")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.show()
+# Zapis błędów do DataFrame
+error_df = pd.DataFrame(error_results)
+
+# Histogram błędów MAE
+plt.figure(figsize=(10, 6))
+plt.hist(error_df['MAE'], bins=10, edgecolor="black", alpha=0.7)
+plt.title("Histogram of Mean Absolute Error (MAE)")
+plt.xlabel("MAE range")
+plt.ylabel("Frequency")
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.show()
+
+# Histogram błędów MSE
+plt.figure(figsize=(10, 6))
+plt.hist(error_df['MSE'], bins=10, edgecolor="black", alpha=0.7)
+plt.title("Histogram of Mean Squared Error (MSE)")
+plt.xlabel("MSE range")
+plt.ylabel("Frequency")
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.show()
+
+# Podsumowanie wyników
+print(f"Zakończono przetwarzanie {len(results)} utworów.")
+print("Podsumowanie błędów:")
+print(error_df.describe())
