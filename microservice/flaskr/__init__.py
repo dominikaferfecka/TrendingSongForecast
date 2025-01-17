@@ -8,7 +8,7 @@ import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 import pandas as pd
 
-models_folder = 'arima_models/'
+models_folder = 'arima_model/arima_models/'
 
 def load_models(folder):
     models = {}
@@ -61,41 +61,57 @@ def create_app(test_config=None):
         weighted_error = error * weights
         return tf.reduce_mean(weighted_error)
 
-    lstm_model = load_model('lstm_model.keras', custom_objects={'custom_loss': custom_loss})
+    lstm_model = load_model('lstm_model/lstm_model.keras', custom_objects={'custom_loss': custom_loss})
     n_time_steps = 4
     try:
-        X_latest, track_weeks_info = get_latest_data_for_lstm("tracks_without_latest_score.csv", n_time_steps)
+        X_latest, track_weeks_info = get_latest_data_for_lstm("lstm_model/tracks_with_latest_score.csv", n_time_steps)
     except Exception:
         X_latest, track_weeks_info = [], None
+
+    def predict_with_lstm():
+        if len(X_latest) == 0:
+            raise ValueError("Insufficient data for LSTM prediction.")
+
+        predictions = lstm_model.predict(X_latest)
+        track_predictions = []
+
+        for idx, (track_id, _) in enumerate(track_weeks_info):
+            prediction_value = float(predictions[idx][0])
+            track_predictions.append((track_id, prediction_value))
+
+        sorted_predictions = sorted(track_predictions, key=lambda x: x[1], reverse=True)
+        top_50_tracks = sorted_predictions[:50]
+        top_50_ids = [track_id for track_id, _ in top_50_tracks]
+        return {'model': 'lstm', 'prediction': top_50_ids}
+
+    def predict_with_arima():
+        results = []
+        for track_id, model in arima_models.items():
+            forecast = model.predict(n_periods=1).tolist()[-1]
+            results.append({"track_id": track_id, "forecast": forecast})
+
+        sorted_results = sorted(results, key=lambda x: x['forecast'], reverse=True)
+        top_50_tracks = sorted_results[:50]
+        top_50_ids = [track["track_id"] for track in top_50_tracks]
+        return {'model': 'arima', 'prediction': top_50_ids}
+
     @app.route("/predict", methods=["POST"])
     def predict():
         try:
-            # Decyzja o wyborze modelu
-            if len(X_latest) > 0:
-                # Jeśli dane są wystarczające dla LSTM
-                predictions = lstm_model.predict(X_latest)
-                track_predictions = []
+            request_data = request.get_json()
+            model_type = request_data.get("model_type", None)
 
-                for idx, (track_id, _) in enumerate(track_weeks_info):
-                    prediction_value = float(predictions[idx][0])
-                    track_predictions.append((track_id, prediction_value))
+            if model_type == "lstm":
+                return jsonify(predict_with_lstm())
 
-                sorted_predictions = sorted(track_predictions, key=lambda x: x[1], reverse=True)
-                top_50_tracks = sorted_predictions[:50]
-                top_50_ids = [track_id for track_id, _ in top_50_tracks]
-                return jsonify({'model': 'lstm', 'prediction': top_50_ids})
+            elif model_type == "arima":
+                return jsonify(predict_with_arima())
 
             else:
-                # Domyślnie użyj ARIMA
-                results = []
-                for track_id, model in arima_models.items():
-                    forecast = model.predict(n_periods=1).tolist()[-1]
-                    results.append({"track_id": track_id, "forecast": forecast})
-
-                sorted_results = sorted(results, key=lambda x: x['forecast'], reverse=True)
-                top_50_tracks = sorted_results[:50]
-                top_50_ids = [track["track_id"] for track in top_50_tracks]
-                return jsonify({'model': 'arima', 'prediction': top_50_ids})
+                if len(X_latest) > 0:
+                    return jsonify(predict_with_lstm())
+                else:
+                    return jsonify(predict_with_arima())
 
         except Exception as e:
             return jsonify({'error': str(e)}), 400
