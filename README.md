@@ -33,4 +33,4 @@ Aplikacja działa pod ścieżką `/predict` (metoda POST).
 Przewidywanie popularności utworów jest zjawiskiem bardzo trudnym i złożonym. Zdajemy sobie sprawę, że na ten proces wpływają atrybuty ukryte, takie jak nieoczekiwane trendy, wydarzenia kulturowe, "cancel culture" itd. Dlatego też zalecamy regularne dotrenowywanie modeli do najnowszych danych.
 
 ## Ostateczna analiza danych
-Dopracowana i uszczegółowiona analiza danych znajduje się w nowej wersji notatnika w głównym folderze pod nazwą *IUM_etap2.ipynb*.
+Dopracowana i uszczegółowiona analiza danych znajduje się w nowej wersji notatnika w głównym folderze pod nazwą *IUM_etap2.ipynb*
